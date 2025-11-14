@@ -1,0 +1,20 @@
+[package]
+name = "qi-tools"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "qifmt"
+path = "src/bin/qifmt.rs"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+walkdir = "2.3"
+env_logger = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+thiserror = "1.0"
+
+[lib]
+name = "qi_tools"
+path = "src/lib.rs"

@@ -1,0 +1,45 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Test outputs
+test_output/
+test_results/
+*.qi.formatted
+
+# Backup files
+*.bak
+*~
+.DS_Store
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# macOS specific
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows specific
+Thumbs.db
+Desktop.ini
+
+# Binary executables
+qi-fmt
+qi-fmt.exe
+
+# Documentation build
+docs/generated/
