@@ -54,7 +54,7 @@ fn render_program(program: &Program, file_name: Option<&str>) -> String {
         .statements
         .iter()
         .filter_map(|s| match s {
-            AstNode::函数声明(f) if is_public(&f.visibility) => Some(f),
+            AstNode::函数声明(f) => Some(f),
             _ => None,
         })
         .collect();
@@ -63,7 +63,7 @@ fn render_program(program: &Program, file_name: Option<&str>) -> String {
         .statements
         .iter()
         .filter_map(|s| match s {
-            AstNode::结构体声明(s) if is_public(&s.visibility) => Some(s),
+            AstNode::结构体声明(s) => Some(s),
             _ => None,
         })
         .collect();
@@ -72,7 +72,7 @@ fn render_program(program: &Program, file_name: Option<&str>) -> String {
         .statements
         .iter()
         .filter_map(|s| match s {
-            AstNode::枚举声明(e) if is_public(&e.visibility) => Some(e),
+            AstNode::枚举声明(e) => Some(e),
             _ => None,
         })
         .collect();
