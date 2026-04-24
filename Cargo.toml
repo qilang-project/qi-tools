@@ -7,13 +7,23 @@ edition = "2021"
 name = "qifmt"
 path = "src/bin/qifmt.rs"
 
+[[bin]]
+name = "qicheck"
+path = "src/bin/qicheck.rs"
+
+[[bin]]
+name = "qidoc"
+path = "src/bin/qidoc.rs"
+
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
 walkdir = "2.3"
 env_logger = "0.10"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 toml = "0.8"
 thiserror = "1.0"
+qi-compiler = { path = "../qi" }
 
 [lib]
 name = "qi_tools"
