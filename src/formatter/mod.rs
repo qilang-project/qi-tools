@@ -1,22 +1,23 @@
-//! Qi 代码格式化器 - 基于 AST 的格式化实现
-//! AST-based code formatter for Qi language.
+//! Qi 代码格式化器 —— 基于词法扫描的“只动空白”实现
+//!
+//! # 设计原则
+//!
+//! 格式化器只调整空白（缩进、行尾空白、连续空行），**绝不改动任何非空白内容**：
+//!
+//! - 不基于 AST 重打印。编译器 AST 不携带注释（lexer 直接丢弃）、不区分
+//!   `类型`/`结构体` 声明风格、不保留 `导入 模块::{项1, 项2}` 的选择性导入
+//!   原文，且部分节点（如 Go 风格接收者方法 `函数 (自身 类型) 名()`）无法
+//!   无损还原。基于 AST 重打印必然吞注释、改写声明风格，甚至丢代码。
+//! - 逐行处理：不合并行、不拆分行，`;` 永远跟随其语句。
+//! - 通过轻量词法扫描（识别字符串、字符字面量、行注释、可嵌套块注释）
+//!   统计花括号/圆括号深度，仅据此重排行首缩进。
+//! - 输出对自身幂等：格式化两遍与一遍结果完全一致。
 
 mod config;
 mod writer;
 
 pub use config::FormatConfig;
 pub use writer::CodeWriter;
-
-use qi_compiler::parser::ast::{
-    ArrayAccessExpression, ArrayLiteralExpression, AssignmentExpression, AstNode, AwaitExpression,
-    BinaryExpression, BinaryOperator, BlockStatement, EnumDeclaration, ExpressionStatement,
-    FieldAccessExpression, ForStatement, FunctionCallExpression, FunctionDeclaration,
-    IdentifierExpression, IfStatement, ImportStatement, LiteralExpression, LiteralValue,
-    MethodCallExpression, Parameter, Program, ReturnStatement, StringConcatExpression,
-    StructDeclaration, StructField, StructFieldValue, StructLiteralExpression, TypeNode,
-    UnaryExpression, UnaryOperator, VariableDeclaration, WhileStatement,
-};
-use qi_compiler::parser::Parser;
 
 pub struct Formatter {
     config: FormatConfig,
@@ -33,554 +34,70 @@ impl Formatter {
         Self { config }
     }
 
-    /// 格式化 Qi 源文件。优先通过 AST 重新生成；解析失败时回退到文本格式化。
+    /// 格式化 Qi 源文件。只调整空白（缩进/行尾空白/连续空行），
+    /// 非空白内容与源文件逐字符一致。
     pub fn format_file(&self, source: &str) -> Result<String, String> {
-        match Parser::new().parse_source(source) {
-            Ok(program) => Ok(self.format_program(&program)),
-            Err(_) => Ok(self.simple_format(source)),
-        }
+        Ok(self.reindent(source))
     }
 
-    fn format_program(&self, program: &Program) -> String {
-        let mut out = String::new();
+    fn reindent(&self, source: &str) -> String {
+        let indent_unit = self.config.indent_str();
+        let mut out = String::with_capacity(source.len() + 16);
 
-        if let Some(pkg) = &program.package_name {
-            out.push_str(&format!("包 {};\n\n", pkg));
-        }
+        // 跨行状态
+        let mut depth = DepthState::default();
+        let mut pending_blank = false;
+        let mut wrote_any = false;
 
-        if !program.imports.is_empty() {
-            for imp in &program.imports {
-                out.push_str(&self.format_import(imp));
-                out.push('\n');
-            }
-            out.push('\n');
-        }
-
-        for (idx, stmt) in program.statements.iter().enumerate() {
-            if idx > 0 {
-                if !out.ends_with("\n\n") {
+        for raw_line in source.lines() {
+            // 起始于块注释内部的行：原样保留（仅去行尾空白），不重排缩进，
+            // 以免破坏注释内的对齐/示意图。仍需扫描以更新注释/括号状态
+            // （`*/` 之后同一行可能还有代码）。
+            if depth.comment > 0 {
+                if pending_blank {
                     out.push('\n');
+                    pending_blank = false;
                 }
-            }
-            out.push_str(&self.format_node(stmt, 0));
-            if !out.ends_with('\n') {
+                out.push_str(raw_line.trim_end());
                 out.push('\n');
+                wrote_any = true;
+                scan_line(raw_line, &mut depth);
+                continue;
             }
-        }
 
-        while out.ends_with("\n\n\n") {
-            out.pop();
-        }
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out
-    }
-
-    fn format_import(&self, imp: &ImportStatement) -> String {
-        let path = imp.module_path.join(".");
-        let prefix = if imp.is_public { "公开 导入" } else { "导入" };
-        match &imp.alias {
-            Some(alias) => format!("{} {} 作为 {};", prefix, path, alias),
-            None => format!("{} {};", prefix, path),
-        }
-    }
-
-    fn indent(&self, level: usize) -> String {
-        self.config.indent_str().repeat(level)
-    }
-
-    fn format_node(&self, node: &AstNode, level: usize) -> String {
-        match node {
-            AstNode::函数声明(f) => self.format_function(f, level),
-            AstNode::变量声明(v) => self.format_variable_decl(v, level),
-            AstNode::结构体声明(s) => self.format_struct(s, level),
-            AstNode::枚举声明(e) => self.format_enum(e, level),
-            AstNode::如果语句(i) => self.format_if(i, level),
-            AstNode::当语句(w) => self.format_while(w, level),
-            AstNode::对于语句(f) => self.format_for(f, level),
-            AstNode::返回语句(r) => self.format_return(r, level),
-            AstNode::块语句(b) => self.format_block_stmt(b, level),
-            AstNode::表达式语句(e) => self.format_expression_stmt(e, level),
-            AstNode::跳出语句(_) => format!("{}跳出;", self.indent(level)),
-            AstNode::继续语句(_) => format!("{}继续;", self.indent(level)),
-            _ => {
-                let mut s = self.indent(level);
-                s.push_str(&self.format_expression(node));
-                s.push(';');
-                s
-            }
-        }
-    }
-
-    fn format_function(&self, f: &FunctionDeclaration, level: usize) -> String {
-        let mut out = self.indent(level);
-        out.push_str("函数 ");
-        out.push_str(&f.name);
-        out.push('(');
-        out.push_str(&self.format_parameters(&f.parameters));
-        out.push(')');
-        if let Some(rt) = &f.return_type {
-            out.push_str(": ");
-            out.push_str(&self.format_type(rt));
-        }
-        out.push_str(" {\n");
-        for stmt in &f.body {
-            out.push_str(&self.format_node(stmt, level + 1));
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-        out.push_str(&self.indent(level));
-        out.push('}');
-        out.push('\n');
-        out
-    }
-
-    fn format_parameters(&self, params: &[Parameter]) -> String {
-        params
-            .iter()
-            .map(|p| match &p.type_annotation {
-                Some(ty) => format!("{}: {}", p.name, self.format_type(ty)),
-                None => p.name.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    fn format_variable_decl(&self, v: &VariableDeclaration, level: usize) -> String {
-        let mut out = self.indent(level);
-        out.push_str(if v.is_mutable { "变量 " } else { "常量 " });
-        out.push_str(&v.name);
-        if let Some(ty) = &v.type_annotation {
-            out.push_str(": ");
-            out.push_str(&self.format_type(ty));
-        }
-        if let Some(init) = &v.initializer {
-            out.push_str(" = ");
-            out.push_str(&self.format_expression(init));
-        }
-        out.push(';');
-        out
-    }
-
-    fn format_struct(&self, s: &StructDeclaration, level: usize) -> String {
-        let mut out = self.indent(level);
-        out.push_str("结构体 ");
-        out.push_str(&s.name);
-        out.push_str(" {\n");
-        for field in &s.fields {
-            out.push_str(&self.format_struct_field(field, level + 1));
-            out.push('\n');
-        }
-        out.push_str(&self.indent(level));
-        out.push('}');
-        out.push('\n');
-        out
-    }
-
-    fn format_struct_field(&self, field: &StructField, level: usize) -> String {
-        format!(
-            "{}{}: {},",
-            self.indent(level),
-            field.name,
-            self.format_type(&field.type_annotation)
-        )
-    }
-
-    fn format_enum(&self, e: &EnumDeclaration, level: usize) -> String {
-        let mut out = self.indent(level);
-        out.push_str("枚举 ");
-        out.push_str(&e.name);
-        out.push_str(" {\n");
-        for v in &e.variants {
-            out.push_str(&self.indent(level + 1));
-            out.push_str(&v.name);
-            if let Some(val) = v.value {
-                out.push_str(&format!(" = {}", val));
-            }
-            out.push_str(",\n");
-        }
-        out.push_str(&self.indent(level));
-        out.push('}');
-        out.push('\n');
-        out
-    }
-
-    fn format_if(&self, i: &IfStatement, level: usize) -> String {
-        let mut out = self.indent(level);
-        out.push_str("如果 ");
-        out.push_str(&self.format_expression(&i.condition));
-        out.push_str(" {\n");
-        for stmt in &i.then_branch {
-            out.push_str(&self.format_node(stmt, level + 1));
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-        out.push_str(&self.indent(level));
-        out.push('}');
-        if let Some(else_branch) = &i.else_branch {
-            out.push_str(" 否则 ");
-            match else_branch.as_ref() {
-                AstNode::如果语句(nested) => {
-                    let inner = self.format_if(nested, level);
-                    out.push_str(inner.trim_start());
-                }
-                AstNode::块语句(b) => {
-                    out.push_str("{\n");
-                    for stmt in &b.statements {
-                        out.push_str(&self.format_node(stmt, level + 1));
-                        if !out.ends_with('\n') {
-                            out.push('\n');
-                        }
-                    }
-                    out.push_str(&self.indent(level));
-                    out.push('}');
-                }
-                other => {
-                    out.push_str("{\n");
-                    out.push_str(&self.format_node(other, level + 1));
-                    if !out.ends_with('\n') {
-                        out.push('\n');
-                    }
-                    out.push_str(&self.indent(level));
-                    out.push('}');
-                }
-            }
-        }
-        out
-    }
-
-    fn format_while(&self, w: &WhileStatement, level: usize) -> String {
-        let mut out = self.indent(level);
-        out.push_str("当 ");
-        out.push_str(&self.format_expression(&w.condition));
-        out.push_str(" {\n");
-        for stmt in &w.body {
-            out.push_str(&self.format_node(stmt, level + 1));
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-        out.push_str(&self.indent(level));
-        out.push('}');
-        out
-    }
-
-    fn format_for(&self, f: &ForStatement, level: usize) -> String {
-        let mut out = self.indent(level);
-        out.push_str("对于 ");
-        out.push_str(&f.variable);
-        out.push_str(" 在 ");
-        out.push_str(&self.format_expression(&f.range));
-        out.push_str(" {\n");
-        for stmt in &f.body {
-            out.push_str(&self.format_node(stmt, level + 1));
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-        out.push_str(&self.indent(level));
-        out.push('}');
-        out
-    }
-
-    fn format_return(&self, r: &ReturnStatement, level: usize) -> String {
-        let mut out = self.indent(level);
-        out.push_str("返回");
-        if let Some(v) = &r.value {
-            out.push(' ');
-            out.push_str(&self.format_expression(v));
-        }
-        out.push(';');
-        out
-    }
-
-    fn format_block_stmt(&self, b: &BlockStatement, level: usize) -> String {
-        let mut out = self.indent(level);
-        out.push_str("{\n");
-        for stmt in &b.statements {
-            out.push_str(&self.format_node(stmt, level + 1));
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-        out.push_str(&self.indent(level));
-        out.push('}');
-        out
-    }
-
-    fn format_expression_stmt(&self, e: &ExpressionStatement, level: usize) -> String {
-        let mut out = self.indent(level);
-        out.push_str(&self.format_expression(&e.expression));
-        out.push(';');
-        out
-    }
-
-    fn format_expression(&self, node: &AstNode) -> String {
-        match node {
-            AstNode::字面量表达式(lit) => self.format_literal(lit),
-            AstNode::标识符表达式(id) => self.format_identifier(id),
-            AstNode::二元操作表达式(b) => self.format_binary(b),
-            AstNode::一元操作表达式(u) => self.format_unary(u),
-            AstNode::函数调用表达式(c) => self.format_call(c),
-            AstNode::赋值表达式(a) => self.format_assignment(a),
-            AstNode::数组访问表达式(a) => self.format_array_access(a),
-            AstNode::数组字面量表达式(a) => self.format_array_literal(a),
-            AstNode::字符串连接表达式(c) => self.format_string_concat(c),
-            AstNode::字段访问表达式(f) => self.format_field_access(f),
-            AstNode::方法调用表达式(m) => self.format_method_call(m),
-            AstNode::结构体实例化表达式(s) => self.format_struct_literal(s),
-            AstNode::等待表达式(a) => self.format_await(a),
-            _ => format!("/* {:?} */", std::any::type_name::<AstNode>()),
-        }
-    }
-
-    fn format_literal(&self, lit: &LiteralExpression) -> String {
-        match &lit.value {
-            LiteralValue::整数(n) => n.to_string(),
-            LiteralValue::浮点数(f) => {
-                if f.fract() == 0.0 && f.is_finite() {
-                    format!("{:.1}", f)
-                } else {
-                    f.to_string()
-                }
-            }
-            LiteralValue::字符串(s) => format!("\"{}\"", escape_string(s)),
-            LiteralValue::布尔(b) => {
-                if *b {
-                    "真".to_string()
-                } else {
-                    "假".to_string()
-                }
-            }
-            LiteralValue::字符(c) => format!("'{}'", c),
-        }
-    }
-
-    fn format_identifier(&self, id: &IdentifierExpression) -> String {
-        id.name.clone()
-    }
-
-    fn format_binary(&self, b: &BinaryExpression) -> String {
-        format!(
-            "{} {} {}",
-            self.format_expression(&b.left),
-            format_binary_op(b.operator),
-            self.format_expression(&b.right)
-        )
-    }
-
-    fn format_unary(&self, u: &UnaryExpression) -> String {
-        let op = match u.operator {
-            UnaryOperator::非 => "!",
-            UnaryOperator::负 => "-",
-            UnaryOperator::正 => "+",
-        };
-        format!("{}{}", op, self.format_expression(&u.operand))
-    }
-
-    fn format_call(&self, c: &FunctionCallExpression) -> String {
-        let args = c
-            .arguments
-            .iter()
-            .map(|a| self.format_expression(a))
-            .collect::<Vec<_>>()
-            .join(", ");
-        match &c.module_qualifier {
-            Some(q) => format!("{}.{}({})", q, c.callee, args),
-            None => format!("{}({})", c.callee, args),
-        }
-    }
-
-    fn format_assignment(&self, a: &AssignmentExpression) -> String {
-        format!(
-            "{} = {}",
-            self.format_expression(&a.target),
-            self.format_expression(&a.value)
-        )
-    }
-
-    fn format_array_access(&self, a: &ArrayAccessExpression) -> String {
-        format!(
-            "{}[{}]",
-            self.format_expression(&a.array),
-            self.format_expression(&a.index)
-        )
-    }
-
-    fn format_array_literal(&self, a: &ArrayLiteralExpression) -> String {
-        let items = a
-            .elements
-            .iter()
-            .map(|e| self.format_expression(e))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("[{}]", items)
-    }
-
-    fn format_string_concat(&self, c: &StringConcatExpression) -> String {
-        format!(
-            "{} + {}",
-            self.format_expression(&c.left),
-            self.format_expression(&c.right)
-        )
-    }
-
-    fn format_field_access(&self, f: &FieldAccessExpression) -> String {
-        format!("{}.{}", self.format_expression(&f.object), f.field)
-    }
-
-    fn format_method_call(&self, m: &MethodCallExpression) -> String {
-        let args = m
-            .arguments
-            .iter()
-            .map(|a| self.format_expression(a))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "{}.{}({})",
-            self.format_expression(&m.object),
-            m.method_name,
-            args
-        )
-    }
-
-    fn format_struct_literal(&self, s: &StructLiteralExpression) -> String {
-        let fields = s
-            .fields
-            .iter()
-            .map(|f: &StructFieldValue| {
-                format!("{}: {}", f.name, self.format_expression(&f.value))
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("{} {{ {} }}", s.struct_name, fields)
-    }
-
-    fn format_await(&self, a: &AwaitExpression) -> String {
-        format!("等待 {}", self.format_expression(&a.expression))
-    }
-
-    fn format_type(&self, ty: &TypeNode) -> String {
-        match ty {
-            TypeNode::基础类型(b) => format!("{:?}", b),
-            TypeNode::自定义类型(name) => name.clone(),
-            TypeNode::数组类型(a) => match a.size {
-                Some(n) => format!("[{}; {}]", self.format_type(&a.element_type), n),
-                None => format!("[{}]", self.format_type(&a.element_type)),
-            },
-            TypeNode::列表类型(l) => format!("列表<{}>", self.format_type(&l.element_type)),
-            TypeNode::集合类型(s) => format!("集合<{}>", self.format_type(&s.element_type)),
-            TypeNode::字典类型(d) => format!(
-                "字典<{}, {}>",
-                self.format_type(&d.key_type),
-                self.format_type(&d.value_type)
-            ),
-            TypeNode::通道类型(c) => format!("通道<{}>", self.format_type(&c.element_type)),
-            TypeNode::指针类型(p) => format!("*{}", self.format_type(&p.target_type)),
-            TypeNode::引用类型(r) => {
-                if r.is_mutable {
-                    format!("&mut {}", self.format_type(&r.target_type))
-                } else {
-                    format!("&{}", self.format_type(&r.target_type))
-                }
-            }
-            TypeNode::未来类型(inner) => format!("未来<{}>", self.format_type(inner)),
-            TypeNode::结果类型(r) => format!(
-                "结果<{}, {}>",
-                self.format_type(&r.ok_type),
-                self.format_type(&r.err_type)
-            ),
-            TypeNode::选项类型(o) => format!("选项<{}>", self.format_type(&o.inner_type)),
-            TypeNode::泛型类型(g) => {
-                let args = g
-                    .type_arguments
-                    .iter()
-                    .map(|t| self.format_type(t))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{}<{}>", g.base_type, args)
-            }
-            _ => format!("{:?}", ty),
-        }
-    }
-
-    fn simple_format(&self, source: &str) -> String {
-        let mut preprocessed = String::new();
-        let chars: Vec<char> = source.chars().collect();
-        let mut i = 0;
-
-        while i < chars.len() {
-            let ch = chars[i];
-            match ch {
-                '{' | '【' => {
-                    preprocessed.push(ch);
-                    preprocessed.push('\n');
-                }
-                '}' | '】' => {
-                    if !preprocessed.ends_with('\n') {
-                        preprocessed.push('\n');
-                    }
-                    preprocessed.push(ch);
-                    preprocessed.push('\n');
-                }
-                ';' | '；' => {
-                    preprocessed.push(ch);
-                    preprocessed.push('\n');
-                }
-                _ => preprocessed.push(ch),
-            }
-            i += 1;
-        }
-
-        let mut result = String::new();
-        let mut indent_level: usize = 0;
-        let mut prev_was_closing_brace = false;
-
-        for line in preprocessed.lines() {
-            let trimmed = line.trim();
+            let trimmed = raw_line.trim();
             if trimmed.is_empty() {
+                // 连续空行折叠为一个；文件首部空行丢弃
+                if wrote_any && self.config.preserve_blank_lines {
+                    pending_blank = true;
+                }
                 continue;
             }
 
-            if prev_was_closing_brace && indent_level == 0 {
-                if !trimmed.starts_with('}') && !trimmed.starts_with('】') {
-                    result.push('\n');
-                }
+            if pending_blank {
+                out.push('\n');
+                pending_blank = false;
             }
 
-            if trimmed.starts_with("包 ") || trimmed.starts_with("包\t") {
-                let indent = self.config.indent_str().repeat(indent_level);
-                result.push_str(&indent);
-                result.push_str(trimmed);
-                result.push('\n');
-                result.push('\n');
-                prev_was_closing_brace = false;
-                continue;
+            // 行首的闭合符决定本行相对当前深度回退多少级
+            let lead = leading_closers(trimmed);
+            let mut level = depth.brace.saturating_sub(lead.braces);
+            if depth.paren.saturating_sub(lead.parens) > 0 {
+                // 未闭合圆括号/方括号内的续行统一多缩进一级
+                level += 1;
             }
 
-            if trimmed.starts_with('}') || trimmed.starts_with('】') {
-                if indent_level > 0 {
-                    indent_level -= 1;
-                }
-                prev_was_closing_brace = true;
-            } else {
-                prev_was_closing_brace = false;
+            for _ in 0..level {
+                out.push_str(&indent_unit);
             }
+            out.push_str(trimmed);
+            out.push('\n');
+            wrote_any = true;
 
-            let indent = self.config.indent_str().repeat(indent_level);
-            result.push_str(&indent);
-            result.push_str(trimmed);
-            result.push('\n');
-
-            if trimmed.ends_with('{') || trimmed.ends_with('【') {
-                indent_level += 1;
-            }
+            scan_line(trimmed, &mut depth);
         }
 
-        result
+        out
     }
 }
 
@@ -590,64 +107,236 @@ impl Default for Formatter {
     }
 }
 
-fn format_binary_op(op: BinaryOperator) -> &'static str {
-    match op {
-        BinaryOperator::加 => "+",
-        BinaryOperator::减 => "-",
-        BinaryOperator::乘 => "*",
-        BinaryOperator::除 => "/",
-        BinaryOperator::取余 => "%",
-        BinaryOperator::等于 => "==",
-        BinaryOperator::不等于 => "!=",
-        BinaryOperator::大于 => ">",
-        BinaryOperator::小于 => "<",
-        BinaryOperator::大于等于 => ">=",
-        BinaryOperator::小于等于 => "<=",
-        BinaryOperator::与 => "&&",
-        BinaryOperator::或 => "||",
-    }
+/// 跨行扫描状态：块注释嵌套深度与括号深度
+#[derive(Default)]
+struct DepthState {
+    /// 块注释嵌套深度（Qi 的 `/* */` 支持嵌套）
+    comment: usize,
+    /// 花括号（`{}` / `【】`）深度，决定缩进级别
+    brace: usize,
+    /// 圆括号/方括号（`()` / `（）` / `[]`）深度，用于续行缩进
+    paren: usize,
 }
 
-fn escape_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
+/// 行首连续闭合符统计（允许闭合符之间有空白），如 `};`、`} 否则 {`、`);`
+struct LeadingClosers {
+    braces: usize,
+    parens: usize,
+}
+
+fn leading_closers(trimmed: &str) -> LeadingClosers {
+    let mut braces = 0;
+    let mut parens = 0;
+    for c in trimmed.chars() {
         match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
+            '}' | '】' => braces += 1,
+            ')' | '）' | ']' => parens += 1,
+            c if c.is_whitespace() => continue,
+            _ => break,
         }
     }
-    out
+    LeadingClosers { braces, parens }
+}
+
+/// 扫描一行，更新括号/注释深度。
+/// 跳过字符串字面量（含 f"..." 格式字符串）、字符字面量、行注释与可嵌套块注释，
+/// 保证注释和字符串里的括号不影响缩进计算。
+fn scan_line(line: &str, depth: &mut DepthState) {
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+
+    while i < n {
+        // 块注释内部：只找 `*/` 与嵌套的 `/*`
+        if depth.comment > 0 {
+            if chars[i] == '*' && i + 1 < n && chars[i + 1] == '/' {
+                depth.comment -= 1;
+                i += 2;
+            } else if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
+                depth.comment += 1;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        let c = chars[i];
+        match c {
+            // 行注释：本行剩余部分全部忽略
+            '/' if i + 1 < n && chars[i + 1] == '/' => break,
+            // 块注释开始
+            '/' if i + 1 < n && chars[i + 1] == '*' => {
+                depth.comment += 1;
+                i += 2;
+                continue;
+            }
+            // 字符串字面量（f"..." 的 f 前缀无需特判，引号处理一致）
+            '"' => {
+                i += 1;
+                while i < n && chars[i] != '"' {
+                    if chars[i] == '\\' {
+                        i += 1; // 跳过转义字符
+                    }
+                    i += 1;
+                }
+                i += 1; // 跳过闭引号（或行尾）
+                continue;
+            }
+            // 字符字面量：'x' 或 '\x'；不匹配该模式时按普通字符处理
+            '\'' => {
+                if i + 3 < n && chars[i + 1] == '\\' && chars[i + 3] == '\'' {
+                    i += 4;
+                    continue;
+                }
+                if i + 2 < n && chars[i + 2] == '\'' {
+                    i += 3;
+                    continue;
+                }
+            }
+            '{' | '【' => depth.brace += 1,
+            '}' | '】' => depth.brace = depth.brace.saturating_sub(1),
+            '(' | '（' | '[' => depth.paren += 1,
+            ')' | '）' | ']' => depth.paren = depth.paren.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn fmt(source: &str) -> String {
+        Formatter::new().format_file(source).unwrap()
+    }
+
+    /// 去掉全部空白后应与源文件逐字符一致（格式化器只动空白）
+    fn assert_whitespace_only_change(source: &str) {
+        let formatted = fmt(source);
+        let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        assert_eq!(strip(source), strip(&formatted), "非空白内容被改动");
+    }
+
+    /// 幂等：格式化两遍与一遍结果一致
+    fn assert_idempotent(source: &str) {
+        let once = fmt(source);
+        let twice = fmt(&once);
+        assert_eq!(once, twice, "格式化不幂等");
+    }
+
     #[test]
     fn test_basic_format() {
-        let source = "包 测试;\n函数 示例() {\n变量 x = 10;\n}";
-        let formatter = Formatter::new();
-        let result = formatter.format_file(source);
-        assert!(result.is_ok());
+        let source = "包 测试;\n函数 示例() {\n变量 x = 10;\n}\n";
+        let result = fmt(source);
+        assert!(result.contains("    变量 x = 10;"));
+        assert_idempotent(source);
     }
 
     #[test]
     fn test_indent() {
-        let source = "函数 测试() { 如果 真 { 打印(1); } }";
-        let formatter = Formatter::new();
-        let result = formatter.format_file(source).unwrap();
-        assert!(result.contains("    "));
+        let source = "函数 测试() {\n如果 真 {\n打印(1);\n}\n}\n";
+        let result = fmt(source);
+        assert!(result.contains("    如果 真 {"));
+        assert!(result.contains("        打印(1);"));
+        assert!(result.contains("    }\n}"));
+    }
+
+    #[test]
+    fn test_semicolon_stays_with_statement() {
+        // 结构体字面量语句：`};` 不允许拆开，行结构原样保留
+        let source = "函数 入口() {\n变量 矩 = 矩形 { 宽: 3.0, 高: 4.0 };\n}\n";
+        let result = fmt(source);
+        assert!(result.contains("    变量 矩 = 矩形 { 宽: 3.0, 高: 4.0 };"));
+        assert!(!result.contains("\n;"));
+        assert_whitespace_only_change(source);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comments_preserved() {
+        let source = "// 整行注释\n包 主程序;\n\n函数 入口() {\n变量 x = 1; // 行尾注释\n/* 块注释\n   第二行 */\n打印行(x);\n}\n";
+        let result = fmt(source);
+        assert!(result.contains("// 整行注释"));
+        assert!(result.contains("变量 x = 1; // 行尾注释"));
+        assert!(result.contains("/* 块注释"));
+        assert!(result.contains("第二行 */"));
+        assert_whitespace_only_change(source);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_selective_import_untouched() {
+        let source = "包 主程序;\n\n导入 Web::{应用, 路由};\n";
+        let result = fmt(source);
+        assert!(result.contains("导入 Web::{应用, 路由};"));
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_type_declaration_style_untouched() {
+        let source = "类型 矩形 {\n浮点数 宽;\n浮点数 高;\n}\n";
+        let result = fmt(source);
+        assert!(result.contains("类型 矩形 {"));
+        assert!(result.contains("    浮点数 宽;"));
+        assert!(!result.contains("结构体"));
+        assert_whitespace_only_change(source);
+    }
+
+    #[test]
+    fn test_receiver_method_untouched() {
+        // Go 风格接收者方法：绝不允许被占位符替换
+        let source = "函数 (自身 矩形) 面积(): 浮点数 {\n返回 自身.宽 * 自身.高;\n}\n";
+        let result = fmt(source);
+        assert!(result.contains("函数 (自身 矩形) 面积(): 浮点数 {"));
+        assert!(result.contains("    返回 自身.宽 * 自身.高;"));
+        assert!(!result.contains("/*"));
+        assert_whitespace_only_change(source);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_braces_in_strings_and_comments_ignored() {
+        let source =
+            "函数 入口() {\n变量 s = \"{{{\"; // 注释里的 } 也不算\n变量 c = '{';\n打印行(s, c);\n}\n";
+        let result = fmt(source);
+        assert!(result.contains("    打印行(s, c);"));
+        assert!(result.ends_with("}\n"));
+        assert_whitespace_only_change(source);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_else_brace_line() {
+        let source = "函数 入口() {\n如果 真 {\n打印(1);\n} 否则 {\n打印(2);\n}\n}\n";
+        let result = fmt(source);
+        assert!(result.contains("    } 否则 {"));
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_blank_lines_collapsed() {
+        let source = "包 主程序;\n\n\n\n函数 入口() {\n}\n";
+        let result = fmt(source);
+        assert!(result.contains("包 主程序;\n\n函数 入口() {"));
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_continuation_line_in_parens() {
+        let source = "函数 入口() {\n打印行(\"a\",\n\"b\");\n}\n";
+        let result = fmt(source);
+        assert!(result.contains("    打印行(\"a\",\n        \"b\");"));
+        assert_idempotent(source);
     }
 
     #[test]
     fn test_fallback_on_parse_error() {
-        let source = "不是有效的 Qi { 代码";
-        let formatter = Formatter::new();
-        let result = formatter.format_file(source);
+        // 语法不完整的输入也不应报错或丢内容
+        let source = "不是有效的 Qi { 代码\n";
+        let result = Formatter::new().format_file(source);
         assert!(result.is_ok());
+        assert_whitespace_only_change(source);
     }
 }
