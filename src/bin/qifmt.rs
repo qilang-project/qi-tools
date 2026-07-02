@@ -94,7 +94,7 @@ fn main() {
             total_files += 1;
             match format_file(path, &cli, &config) {
                 Ok(true) => formatted_files += 1,
-                Ok(false) => {}, // 已经格式化
+                Ok(false) => {} // 已经格式化
                 Err(e) => {
                     eprintln!("错误: 格式化 {:?} 失败: {}", path, e);
                     error_files += 1;
@@ -143,12 +143,12 @@ fn format_file(
     }
 
     // 读取文件
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取文件失败: {}", e))?;
+    let source = std::fs::read_to_string(path).map_err(|e| format!("读取文件失败: {}", e))?;
 
     // 使用格式化器
     let formatter = qi_tools::formatter::Formatter::with_config(config.clone());
-    let formatted = formatter.format_file(&source)
+    let formatted = formatter
+        .format_file(&source)
         .map_err(|e| format!("格式化失败: {}", e))?;
 
     // 检查是否需要格式化
@@ -170,8 +170,7 @@ fn format_file(
 
     if needs_formatting && !cli.check {
         // 写回文件
-        std::fs::write(path, formatted)
-            .map_err(|e| format!("写入文件失败: {}", e))?;
+        std::fs::write(path, formatted).map_err(|e| format!("写入文件失败: {}", e))?;
 
         if !cli.quiet {
             println!("已格式化: {:?}", path);
@@ -203,7 +202,7 @@ fn format_directory(
 
         match format_file(&path, cli, config) {
             Ok(true) => formatted += 1,
-            Ok(false) => {},
+            Ok(false) => {}
             Err(e) => {
                 eprintln!("错误: {:?}: {}", path, e);
                 errors += 1;
@@ -222,7 +221,11 @@ fn print_diff(original: &str, formatted: &str, path: &PathBuf) {
     let original_lines: Vec<&str> = original.lines().collect();
     let formatted_lines: Vec<&str> = formatted.lines().collect();
 
-    for (i, (orig, fmt)) in original_lines.iter().zip(formatted_lines.iter()).enumerate() {
+    for (i, (orig, fmt)) in original_lines
+        .iter()
+        .zip(formatted_lines.iter())
+        .enumerate()
+    {
         if orig != fmt {
             println!("@@ 行 {} @@", i + 1);
             println!("- {}", orig);

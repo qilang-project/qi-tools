@@ -110,7 +110,11 @@ fn is_public(visibility: &Visibility) -> bool {
 
 fn render_import(imp: &ImportStatement) -> String {
     let path = imp.module_path.join(".");
-    let prefix = if imp.is_public { "公开 导入" } else { "导入" };
+    let prefix = if imp.is_public {
+        "公开 导入"
+    } else {
+        "导入"
+    };
     match &imp.alias {
         Some(alias) => format!("`{} {} 作为 {}`", prefix, path, alias),
         None => format!("`{} {}`", prefix, path),

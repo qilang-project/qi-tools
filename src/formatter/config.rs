@@ -79,20 +79,17 @@ impl Default for FormatConfig {
 impl FormatConfig {
     /// 从 TOML 文件加载配置
     pub fn from_file(path: &std::path::Path) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("无法读取配置文件: {}", e))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("无法读取配置文件: {}", e))?;
 
-        toml::from_str(&content)
-            .map_err(|e| format!("配置文件格式错误: {}", e))
+        toml::from_str(&content).map_err(|e| format!("配置文件格式错误: {}", e))
     }
 
     /// 保存配置到文件
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), String> {
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| format!("序列化配置失败: {}", e))?;
+        let content = toml::to_string_pretty(self).map_err(|e| format!("序列化配置失败: {}", e))?;
 
-        std::fs::write(path, content)
-            .map_err(|e| format!("写入配置文件失败: {}", e))
+        std::fs::write(path, content).map_err(|e| format!("写入配置文件失败: {}", e))
     }
 
     /// 获取缩进字符串
