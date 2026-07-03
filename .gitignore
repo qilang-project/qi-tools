@@ -37,9 +37,10 @@ temp/
 Thumbs.db
 Desktop.ini
 
-# Binary executables
-qi-fmt
-qi-fmt.exe
+# Binary executables (qi-fmt/ 是 Qi 写的格式化器源码目录,只忽略编译产物)
+qi-fmt/qifmt
+qi-fmt/qifmt.exe
+qi-fmt/*.o
 
 # Documentation build
 docs/generated/
