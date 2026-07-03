@@ -43,3 +43,5 @@ qi-fmt.exe
 
 # Documentation build
 docs/generated/
+qi-init/qi-init
+qi-init/*.o
