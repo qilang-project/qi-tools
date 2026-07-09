@@ -61,6 +61,9 @@ unsafe fn classify(t: CXType) -> (CXTypeKind, Option<PointeeKind>) {
         let p = clang_getCanonicalType(clang_getPointeeType(canon));
         Some(match p.kind {
             CXType_Char_S | CXType_SChar | CXType_Char_U | CXType_UChar => PointeeKind::Char,
+            // 函数指针（回调）：v2 编译器支持手写，但 bindgen 暂不自动生成签名。
+            CXType_FunctionProto | CXType_FunctionNoProto => PointeeKind::Function,
+            // void* / 对象指针（struct* 等）→ 不透明 指针 句柄。
             _ => PointeeKind::Other,
         })
     } else {

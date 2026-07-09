@@ -19,13 +19,15 @@ pub mod ctypes;
 pub mod generate;
 pub mod parse;
 
-/// Qi 可映射的参数类型（`外部` v1 参数子集）。
+/// Qi 可映射的参数类型（`外部` v2 参数子集）。
+/// v2 新增 指针（void*/对象指针，如 OpenSSL 的 SHA256_CTX*）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QiParamType {
     整数,
     浮点数,
     布尔,
     字符串,
+    指针,
 }
 
 impl QiParamType {
@@ -35,17 +37,21 @@ impl QiParamType {
             QiParamType::浮点数 => "浮点数",
             QiParamType::布尔 => "布尔",
             QiParamType::字符串 => "字符串",
+            QiParamType::指针 => "指针",
         }
     }
 }
 
-/// Qi 可映射的返回类型（`外部` v1 返回子集；char* 返回不支持）。
+/// Qi 可映射的返回类型（`外部` v2 返回子集）。
+/// v2 新增 字符串（char* 返回，调用点拷贝进 Qi 堆串）与 指针（void*/对象指针）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QiRetType {
     整数,
     浮点数,
     布尔,
     空,
+    字符串,
+    指针,
 }
 
 impl QiRetType {
@@ -55,6 +61,8 @@ impl QiRetType {
             QiRetType::浮点数 => "浮点数",
             QiRetType::布尔 => "布尔",
             QiRetType::空 => "空",
+            QiRetType::字符串 => "字符串",
+            QiRetType::指针 => "指针",
         }
     }
 }
