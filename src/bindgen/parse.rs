@@ -28,9 +28,11 @@ fn ensure_loaded() -> Result<(), String> {
     if ok {
         Ok(())
     } else {
-        Err("无法加载 libclang。请设置 LIBCLANG_PATH 指向 libclang 目录\n\
+        Err(
+            "无法加载 libclang。请设置 LIBCLANG_PATH 指向 libclang 目录\n\
              （如 export LIBCLANG_PATH=/opt/homebrew/opt/llvm@21/lib）。"
-            .to_string())
+                .to_string(),
+        )
     }
 }
 
