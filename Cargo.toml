@@ -1,6 +1,6 @@
 [package]
 name = "qi-tools"
-version = "2026.7.24-1"
+version = "2026.7.29-1"
 edition = "2021"
 
 [[bin]]
@@ -27,7 +27,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
 thiserror = "1.0"
-qi-compiler = { version = "2026.7.24-1", path = "../qi" }
+# path 依赖不发布到 crates.io，不要钉版本 —— 钉了的话 qi 每次发版
+# 都得同步改这里，忘一次整个 workspace 就编不过（2026-07-29 踩过）。
+qi-compiler = { path = "../qi" }
 # libclang 动态加载：解析 C 头文件生成 外部 声明（qi-bindgen）
 clang-sys = { version = "1.8", features = ["runtime"] }
 
